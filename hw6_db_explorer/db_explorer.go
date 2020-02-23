@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"strconv"
+	"io/ioutil"
+	"sort"
 )
 
 type Handler struct {
@@ -17,8 +19,8 @@ type Handler struct {
 }
 
 var (
-	entriesPattern = regexp.MustCompile(`^\/[[:alnum:]]+$`)
-	entryPattern = regexp.MustCompile(`^\/[[:alnum:]]+\/.+`)
+	entriesPattern = regexp.MustCompile(`^\/[^\/]+\/?$`)
+	entryPattern = regexp.MustCompile(`^\/[^\/]+\/.+`)
 )
 
 type ApiErrorResponse struct {
@@ -26,26 +28,27 @@ type ApiErrorResponse struct {
 }
 
 type ApiSuccessResponse struct {
-	Error 		string 			`json:"error"`
 	Response 	interface{} `json:"response"`
 }
 
-type FieldInfo struct {
-	Name				string
-	Type    		string
-	Nullable 		string	
-}
-
 type Table struct {
+	Name					string
 	PrimaryKey		string
 	Fields				map[string]Field
 }
 
 type Field struct {
-	Name				string
-	Type				string
-	Nullable		bool
+	Name					string
+	Type					string
+	Nullable			bool
+	AutoIncrement bool
+	Default 			interface{}
 }
+
+const (
+	DEFAULT_LIMIT = 5
+	DEFAULT_OFFSET = 0
+)
 
 func InternalServerError(err error, w http.ResponseWriter) {
 	fmt.Println(err)
@@ -64,7 +67,7 @@ func errorResponse(status int, message string, w http.ResponseWriter) {
 }
 
 func successResponse(status int, obj interface{}, w http.ResponseWriter) {
-	res, err := json.Marshal(ApiSuccessResponse{"", obj})
+	res, err := json.Marshal(ApiSuccessResponse{obj})
 	if err != nil {
 		InternalServerError(err, w)
 		return
@@ -74,58 +77,55 @@ func successResponse(status int, obj interface{}, w http.ResponseWriter) {
 }
 
 func (h *Handler) ListTables(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.DB.Query("SHOW TABLES;")
-	defer rows.Close()
-	if err != nil {
-		InternalServerError(err, w)		
-		return
+	var tables []string
+	for k := range h.tables {
+			tables = append(tables, k)
 	}
-	
-	tables := make([]string, 0)
-	for rows.Next() {
-		var table string
-		err = rows.Scan(&table)
-		if err != nil {
-			InternalServerError(err, w)			
-			return
-		}
-		tables = append(tables, table)
-	}	
+	sort.Strings(tables)
 
 	successResponse(http.StatusOK, map[string][]string{"tables": tables}, w)
 }
 
-func getLimitOffset(u *url.URL) (string, string) {
+func getLimitOffset(u *url.URL) (int, int) {
 	q := u.Query()
-	limit, ok := q["limit"]
-	if !ok {
-		limit = []string{"5"}
-	}
-	offset, ok := q["offset"]
-	if !ok {
-		offset = []string{"0"}
+	limit := DEFAULT_LIMIT
+	offset := DEFAULT_OFFSET
+
+	limitParam, _ := q["limit"]
+	if len(limitParam) > 0 {				
+		limitInt, err := strconv.Atoi(limitParam[0])
+		if err == nil {
+			limit = limitInt
+		}	
 	}
 
-	return limit[0], offset[0]
+	offsetParam, _ := q["offset"]
+	if len(offsetParam) > 0 {				
+		offsetInt, err := strconv.Atoi(offsetParam[0])
+		if err == nil {
+			offset = offsetInt
+		}	
+	}
+
+	return limit, offset
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
-	tableName := strings.Split(r.URL.Path, "/")[1]	
-	table, ok := h.tables[tableName]
-	if !ok {
-		errorResponse(http.StatusBadRequest, "Invalid table param", w)
+	table, err := getTable(r, h)
+	if err != nil {
+		errorResponse(http.StatusNotFound, err.Error(), w)
 		return
 	}
 	limit, offset := getLimitOffset(r.URL)	
 
-	rows, err := h.DB.Query("SELECT * FROM " + tableName + " LIMIT ? OFFSET ?", limit, offset)
+	rows, err := h.DB.Query("SELECT * FROM " + table.Name + " LIMIT ? OFFSET ?", limit, offset)
 	if err != nil {
 		InternalServerError(err, w)		
 		return
 	}
 	defer rows.Close()
 
-	result, err := parseResponse(rows, &table)
+	result, err := parseResponse(rows, table)
 	if err != nil {
 		InternalServerError(err, w)			
 		return
@@ -160,45 +160,207 @@ func parseResponse(rows *sql.Rows, table *Table) ([]map[string]interface{}, erro
 }
 
 func (h *Handler) Show(w http.ResponseWriter, r *http.Request) {
-	params := strings.Split(r.URL.Path, "/")
-	id, err := strconv.Atoi(params[2])
+	table, err := getTable(r, h)
 	if err != nil {
-		errorResponse(http.StatusBadRequest, "id must be int", w)
+		errorResponse(http.StatusBadRequest, err.Error(), w)
 		return
 	}
+	key, err := getKey(r)
+	if err != nil {
+		errorResponse(http.StatusBadRequest, err.Error(), w)
+		return
+	}	
 
-	tableName := params[1]
-	table, ok := h.tables[tableName]
-	if !ok {
-		errorResponse(http.StatusBadRequest, "Invalid table param", w)
-		return
-	}
-	rows, err := h.DB.Query("SELECT * FROM " + tableName + " WHERE " + h.tables[tableName].PrimaryKey + " = ? LIMIT 1", id)
+	rows, err := h.DB.Query("SELECT * FROM " + table.Name + " WHERE " + table.PrimaryKey + " = ? LIMIT 1", key)
 	if err != nil {
 		InternalServerError(err, w)		
 		return
 	}
 	defer rows.Close()
 
-	result, err := parseResponse(rows, &table)
+	result, err := parseResponse(rows, table)
 	if err != nil {
 		InternalServerError(err, w)			
 		return
 	}	
 	if len(result) == 0 {
-		errorResponse(http.StatusNotFound, "Not Found", w)
+		errorResponse(http.StatusNotFound, "record not found", w)
 		return 
 	}
 
 	successResponse(http.StatusOK, map[string]interface{}{"record": result[0]}, w)
 }
 
-func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {	
+	table, err := getTable(r, h)
+	if err != nil {
+		errorResponse(http.StatusBadRequest, err.Error(), w)
+		return
+	}
 	
+	body, err := ioutil.ReadAll(r.Body)
+	defer r.Body.Close()
+	if err != nil {
+		errorResponse(http.StatusBadRequest, err.Error(), w)
+		return
+	}
+
+	var params map[string]interface{}
+	err = json.Unmarshal(body, &params)
+	if err != nil {
+		errorResponse(http.StatusBadRequest, err.Error(), w)
+		return
+	}
+
+	var fields []string
+	var values  []interface{}
+
+	for _,field := range table.Fields {
+		if field.AutoIncrement {
+			continue
+		}		
+		
+		fields = append(fields, field.Name)
+		value, _ := params[field.Name]
+		if value == nil {
+			values = append(values, field.Default)
+			continue
+		}
+		values = append(values, value)			
+	}
+
+	insertSQL := "INSERT INTO $table_name (`$fields`) VALUES ($values)"
+	insertSQL = strings.Replace(insertSQL, "$table_name", table.Name, 1)
+	insertSQL = strings.Replace(insertSQL, "$fields", strings.Join(fields, "`, `"), 1)
+	insertSQL = strings.Replace(insertSQL, "$values", strings.Repeat("?, ", len(fields) - 1) + "?", 1)
+	fmt.Println(insertSQL)
+	_, err = h.DB.Exec(insertSQL, values...)	
+	if err != nil {
+		fmt.Println(err)
+		InternalServerError(err, w)		
+		return
+	}
+	rows, err := h.DB.Query("SELECT LAST_INSERT_ID()")
+	if err != nil {
+		InternalServerError(err, w)		
+		return
+	}
+	defer rows.Close()
+
+	var key int
+	for rows.Next() {		
+		err = rows.Scan(&key)		
+		if err != nil {	
+			InternalServerError(err, w)		
+			return				
+		}				
+	}
+
+	successResponse(http.StatusOK, map[string]int{table.PrimaryKey: key}, w)
 }
 
 func (h *Handler) Edit(w http.ResponseWriter, r *http.Request) {
-	
+	table, err := getTable(r, h)
+	if err != nil {
+		errorResponse(http.StatusBadRequest, err.Error(), w)
+		return
+	}
+	key, err := getKey(r)
+	if err != nil {
+		errorResponse(http.StatusBadRequest, err.Error(), w)
+		return
+	}	
+	body, err := ioutil.ReadAll(r.Body)
+	defer r.Body.Close()
+	if err != nil {
+		errorResponse(http.StatusBadRequest, err.Error(), w)
+		return
+	}
+	var params map[string]interface{}
+	err = json.Unmarshal(body, &params)
+	if err != nil {
+		errorResponse(http.StatusBadRequest, err.Error(), w)
+		return
+	}
+
+	var fields []string
+	var values  []interface{}
+	fmt.Printf("Params: %v",params)
+	for key, value := range params {
+		field, ok := table.Fields[key]
+		if !ok { continue } // skip unknown fields
+		fields = append(fields, field.Name)
+		invalidTypeMessage := "field " + field.Name + " have invalid type"
+		// update auto increment field does not allowed
+		if field.AutoIncrement {
+			errorResponse(http.StatusBadRequest, invalidTypeMessage, w)
+			return
+		}
+
+		switch {
+		case value == nil && field.Nullable:
+			values = append(values, nil)				
+		case field.Type == "string":
+			val, ok := value.(string)
+			if !ok {				
+				errorResponse(http.StatusBadRequest, invalidTypeMessage, w)
+				return
+			}
+			values = append(values, val)
+		case field.Type == "int":
+			val, ok := value.(int)
+			if !ok {
+				errorResponse(http.StatusBadRequest, invalidTypeMessage, w)
+				return
+			}
+			values = append(values, val)
+		}		
+	}	
+	values = append(values, key)
+
+	fmt.Printf("\nFields: %v",fields)
+	fmt.Printf("\nValues: %v",values)
+
+	updateSQL := "UPDATE $table_name SET $fields = ? WHERE $primary_key = ?"
+	updateSQL = strings.Replace(updateSQL, "$table_name", table.Name, 1)
+	updateSQL = strings.Replace(updateSQL, "$primary_key", table.PrimaryKey, 1)
+	updateSQL = strings.Replace(updateSQL, "$fields", strings.Join(fields, " = ?, "), 1)
+	fmt.Println()
+	fmt.Printf(updateSQL, values...)
+	res, err := h.DB.Exec(updateSQL, values...)	
+	if err != nil {
+		fmt.Println(err)
+		InternalServerError(err, w)		
+		return
+	}
+	affected, err := res.RowsAffected() 
+	if err != nil {
+		InternalServerError(err, w)		
+		return
+	}	
+
+	successResponse(http.StatusOK, map[string]int64{"updated": affected}, w)
+}
+
+func getKey(r *http.Request) (int, error) {
+	params := strings.Split(r.URL.Path, "/")
+	key, err := strconv.Atoi(params[2])
+	if err != nil {
+		return 0, fmt.Errorf("Primary key must be int")
+	}
+
+	return key, nil
+}
+
+func getTable(r *http.Request, h *Handler) (*Table, error) {
+	params := strings.Split(r.URL.Path, "/")	
+	tableName := params[1]
+	table, ok := h.tables[tableName]
+	if !ok {
+		return nil, fmt.Errorf("unknown table")
+	}
+
+	return &table, nil
 }
 
 func strToBool(in string) bool {
@@ -215,7 +377,7 @@ type NullString struct {
 
 func (s NullString) MarshalJSON() ([]byte, error) {
 	if s.Valid {
-		return []byte("\"" + s.String + "\""), nil
+		return json.Marshal(s.String)
 	}	
 	return []byte("null"), nil
 }
@@ -246,13 +408,18 @@ func parseRow(table *Table, columns []string, vals []interface{}) map[string]int
 }
 
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
-	params := strings.Split(r.URL.Path, "/")
-	id, err := strconv.Atoi(params[2])
+	table, err := getTable(r, h)
 	if err != nil {
-		errorResponse(http.StatusBadRequest, "id must be int", w)
+		errorResponse(http.StatusBadRequest, err.Error(), w)
 		return
 	}
-	res, err := h.DB.Exec("DELETE FROM " + params[1] + " WHERE id = ?;", id)	
+	id, err := getKey(r)
+	if err != nil {
+		errorResponse(http.StatusBadRequest, err.Error(), w)
+		return
+	}	
+	
+	res, err := h.DB.Exec("DELETE FROM " + table.Name + " WHERE id = ?;", id)	
 	if err != nil {
 		fmt.Println(err)
 		InternalServerError(err, w)		
@@ -287,7 +454,9 @@ func (h *Handler) LoadMetadata() {
 	}	
 
 	for _, tableName := range tables {
-		table := Table{}
+		table := Table{
+			Name: tableName,
+		}
 		
 		rows, err := h.DB.Query("SHOW FULL COLUMNS FROM " + tableName + ";")
 		if err != nil {
@@ -295,7 +464,6 @@ func (h *Handler) LoadMetadata() {
 		}
 
 		var skipColumn	sql.NullString
-		var key 				sql.NullString
 		fields := map[string]Field{}
 		for rows.Next() {
 			var fieldInfo FieldInfo
@@ -304,38 +472,61 @@ func (h *Handler) LoadMetadata() {
 				&fieldInfo.Type, 
 				&skipColumn,
 				&fieldInfo.Nullable,
-				&key,
-				&skipColumn,
-				&skipColumn,
+				&fieldInfo.Key,
+				&fieldInfo.Default,
+				&fieldInfo.Extra,
 				&skipColumn,
 				&skipColumn,
 			)
 			if err != nil {
 				panic(err)
 			}
-			if key.Valid && key.String == "PRI" {
+			if fieldInfo.Key.Valid && fieldInfo.Key.String == "PRI" {
 				table.PrimaryKey = fieldInfo.Name
 			}
-
-			fields[fieldInfo.Name] = Field{
+			
+			field := Field{
 				Name: 		fieldInfo.Name,
 				Type: 		sqlTypeToGolangType(fieldInfo.Type),
 				Nullable: strToBool(fieldInfo.Nullable),
+				AutoIncrement: fieldInfo.Extra.Valid && fieldInfo.Extra.String == "auto_increment",
+			}				
+			if (fieldInfo.Default.Valid) {
+				field.Default = fieldInfo.Default.String
 			}			
+			if field.Default == nil && !field.Nullable {
+				switch field.Type {
+				case "string":
+					field.Default = ""
+				case "int":
+					field.Default = 0
+				}	
+			}
+			fields[fieldInfo.Name] = field			
 		}
 		table.Fields = fields
 		h.tables[tableName] = table		
 	}
 }
 
+type FieldInfo struct {
+	Name				string
+	Type    		string
+	Nullable 		string
+	Key 				sql.NullString
+	Extra 			sql.NullString
+	Default				sql.NullString
+}
+
 func sqlTypeToGolangType(sqlType string) string {
 	switch {
-		case sqlType == "int":
+		case strings.Contains(sqlType, "int"):
 			return "int"
 		case sqlType == "text" || strings.Contains(sqlType, "varchar"):
 			return "string"
 		default:
-			panic("Undefined type")
+			fmt.Println("Unknown type: ", sqlType)
+			return "string"
 	}				
 }
 
