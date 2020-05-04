@@ -266,6 +266,8 @@ func TestLogging(t *testing.T) {
 		{Timestamp: 0, Consumer: "biz_admin", Method: "/main.Biz/Test", Host: ""},
 	}
 
+	fmt.Println(expectedLogData1)
+	fmt.Println(expectedLogData2)
 	if !reflect.DeepEqual(logData1, expectedLogData1) {
 		t.Fatalf("logs1 dont match\nhave %+v\nwant %+v", logData1, expectedLogData1)
 	}
@@ -358,6 +360,7 @@ func TestStat(t *testing.T) {
 		},
 	}
 
+	fmt.Print(expectedStat1)
 	mu.Lock()
 	if !reflect.DeepEqual(stat1, expectedStat1) {
 		t.Fatalf("stat1-1 dont match\nhave %+v\nwant %+v", stat1, expectedStat1)
@@ -391,9 +394,11 @@ func TestStat(t *testing.T) {
 	}
 
 	mu.Lock()
+	fmt.Print(expectedStat1)
 	if !reflect.DeepEqual(stat1, expectedStat1) {
 		t.Fatalf("stat1-2 dont match\nhave %+v\nwant %+v", stat1, expectedStat1)
 	}
+	fmt.Print(expectedStat2)
 	if !reflect.DeepEqual(stat2, expectedStat2) {
 		t.Fatalf("stat2 dont match\nhave %+v\nwant %+v", stat2, expectedStat2)
 	}
