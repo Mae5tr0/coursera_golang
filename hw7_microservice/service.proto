@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+option go_package = ".;main";
+
 // для генерации сервиса:
 // protoc --go_out=plugins=grpc:. *.proto
 

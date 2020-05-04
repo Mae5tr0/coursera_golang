@@ -219,9 +219,10 @@ func TestLogging(t *testing.T) {
 				t.Errorf("bad host: %v", evt.GetHost())
 				return
 			}
-			evt.Host = "" // для тестов
-			evt.Timestamp = 0
-			logData1 = append(logData1, evt)
+			// это грязный хак
+			// protobuf добавляет к структуре свои поля, которвые не видны при приведении к строке и при reflect.DeepEqual
+			// поэтому берем не оригинал сообщения, а только нужные значения
+			logData1 = append(logData1, &Event{Consumer: evt.Consumer, Method: evt.Method})
 		}
 	}()
 	go func() {
@@ -237,9 +238,10 @@ func TestLogging(t *testing.T) {
 				t.Errorf("bad host: %v", evt.GetHost())
 				return
 			}
-			evt.Host = "" // для тестов
-			evt.Timestamp = 0
-			logData2 = append(logData2, evt)
+			// это грязный хак
+			// protobuf добавляет к структуре свои поля, которвые не видны при приведении к строке и при reflect.DeepEqual
+			// поэтому берем не оригинал сообщения, а только нужные значения
+			logData2 = append(logData2, &Event{Consumer: evt.Consumer, Method: evt.Method})
 		}
 	}()
 
@@ -255,19 +257,17 @@ func TestLogging(t *testing.T) {
 	wg.Wait()
 
 	expectedLogData1 := []*Event{
-		{Timestamp: 0, Consumer: "logger", Method: "/main.Admin/Logging", Host: ""},
-		{Timestamp: 0, Consumer: "biz_user", Method: "/main.Biz/Check", Host: ""},
-		{Timestamp: 0, Consumer: "biz_admin", Method: "/main.Biz/Check", Host: ""},
-		{Timestamp: 0, Consumer: "biz_admin", Method: "/main.Biz/Test", Host: ""},
+		{Consumer: "logger", Method: "/main.Admin/Logging"},
+		{Consumer: "biz_user", Method: "/main.Biz/Check"},
+		{Consumer: "biz_admin", Method: "/main.Biz/Check"},
+		{Consumer: "biz_admin", Method: "/main.Biz/Test"},
 	}
 	expectedLogData2 := []*Event{
-		{Timestamp: 0, Consumer: "biz_user", Method: "/main.Biz/Check", Host: ""},
-		{Timestamp: 0, Consumer: "biz_admin", Method: "/main.Biz/Check", Host: ""},
-		{Timestamp: 0, Consumer: "biz_admin", Method: "/main.Biz/Test", Host: ""},
+		{Consumer: "biz_user", Method: "/main.Biz/Check"},
+		{Consumer: "biz_admin", Method: "/main.Biz/Check"},
+		{Consumer: "biz_admin", Method: "/main.Biz/Test"},
 	}
 
-	fmt.Println(expectedLogData1)
-	fmt.Println(expectedLogData2)
 	if !reflect.DeepEqual(logData1, expectedLogData1) {
 		t.Fatalf("logs1 dont match\nhave %+v\nwant %+v", logData1, expectedLogData1)
 	}
@@ -315,8 +315,13 @@ func TestStat(t *testing.T) {
 			}
 			// log.Println("stat1", stat, err)
 			mu.Lock()
-			stat1 = stat
-			stat1.Timestamp = 0
+			// это грязный хак
+			// protobuf добавляет к структуре свои поля, которвые не видны при приведении к строке и при reflect.DeepEqual
+			// поэтому берем не оригинал сообщения, а только нужные значения
+			stat1 = &Stat{
+				ByMethod:   stat.ByMethod,
+				ByConsumer: stat.ByConsumer,
+			}
 			mu.Unlock()
 		}
 	}()
@@ -331,8 +336,13 @@ func TestStat(t *testing.T) {
 			}
 			// log.Println("stat2", stat, err)
 			mu.Lock()
-			stat2 = stat
-			stat2.Timestamp = 0
+			// это грязный хак
+			// protobuf добавляет к структуре свои поля, которвые не видны при приведении к строке и при reflect.DeepEqual
+			// поэтому берем не оригинал сообщения, а только нужные значения
+			stat2 = &Stat{
+				ByMethod:   stat.ByMethod,
+				ByConsumer: stat.ByConsumer,
+			}
 			mu.Unlock()
 		}
 	}()
@@ -346,7 +356,6 @@ func TestStat(t *testing.T) {
 	wait(200) // 2 sec
 
 	expectedStat1 := &Stat{
-		Timestamp: 0,
 		ByMethod: map[string]uint64{
 			"/main.Biz/Check":        1,
 			"/main.Biz/Add":          1,
@@ -360,7 +369,6 @@ func TestStat(t *testing.T) {
 		},
 	}
 
-	fmt.Print(expectedStat1)
 	mu.Lock()
 	if !reflect.DeepEqual(stat1, expectedStat1) {
 		t.Fatalf("stat1-1 dont match\nhave %+v\nwant %+v", stat1, expectedStat1)
@@ -394,11 +402,9 @@ func TestStat(t *testing.T) {
 	}
 
 	mu.Lock()
-	fmt.Print(expectedStat1)
 	if !reflect.DeepEqual(stat1, expectedStat1) {
 		t.Fatalf("stat1-2 dont match\nhave %+v\nwant %+v", stat1, expectedStat1)
 	}
-	fmt.Print(expectedStat2)
 	if !reflect.DeepEqual(stat2, expectedStat2) {
 		t.Fatalf("stat2 dont match\nhave %+v\nwant %+v", stat2, expectedStat2)
 	}
